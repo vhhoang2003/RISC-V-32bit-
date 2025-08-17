@@ -1,14 +1,23 @@
+//==================================================================================//
+// Beginning of RTL/RISC-V/risc-v-32-bit.sv                                         //
+// This file contains the main components of a simple RISC-V 32-bit processor.      //
+// It includes modules for the Program Counter, Instruction Memory, Control Unit,   //
+// Register File, Immediate Generator, ALU Control, ALU, Data Memory, and various   //
+// multiplexers. The design is intended for educational purposes and may not        //
+// include all features of a complete RISC-V implementation.                        //
+//==================================================================================//
+
 //=============================
 // Program Counter
 //=============================
 module Program_Counter(
-    input  logic        clk,
-    input  logic        reset,
-    input  logic [31:0] PC_in,
-    output logic [31:0] PC_out
+    input  logic        clk,                // Clock signal
+    input  logic        reset_n,            // Active-low reset
+    input  logic [31:0] PC_in,              // Input for the next PC value
+    output logic [31:0] PC_out              // Current PC value
 );
-    always_ff @(posedge clk or posedge reset) begin
-        if (reset) PC_out <= 32'b0;
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) PC_out <= 32'b0;
         else       PC_out <= PC_in;
     end
 endmodule
@@ -17,8 +26,8 @@ endmodule
 // PC + 4
 //=============================
 module PC_plus4(
-    input  logic [31:0] fromPC,
-    output logic [31:0] NextPC
+    input  logic [31:0] fromPC,             // Input PC value
+    output logic [31:0] NextPC              // Output PC value (PC + 4)
 );
     assign NextPC = fromPC + 32'd4;
 endmodule
@@ -27,54 +36,57 @@ endmodule
 // Instruction Memory (64 words)
 //=============================
 module Instruction_Memory(
-    input  logic        clk,
-    input  logic        reset,
+    input  logic        clk,            // Clock signal
+    input  logic        reset_n,        // kept for interface consistency; not used
     input  logic [31:0] read_address,   // byte address
-    output logic [31:0] instruction_out
+    output logic [31:0] instruction_out // Instruction output (32 bits)
 );
+    // 64 x 32-bit IMEM (testbench preloads via uut.uIMem.I_Mem)
     logic [31:0] I_Mem [0:63];
-    integer i;
-
-    // Optional: synchronous write not needed; only reset contents
-    always_ff @(posedge clk or posedge reset) begin
-        if (reset) begin
-            for (i = 0; i < 64; i = i + 1) begin
-                I_Mem[i] <= 32'b0;
-            end
-        end
-    end
 
     // Combinational read by word index
-    assign instruction_out = I_Mem[read_address[31:2]];
-endmodule
+    wire [31:0] word_index_full = read_address[31:2];
+    wire        in_range        = (word_index_full < 64);
 
+    assign instruction_out = in_range ? I_Mem[word_index_full] : 32'h0000_0013; // NOP on OOR
+
+    // Simulation-only checks
+    // synthesis translate_off
+    always @* begin
+        assert (read_address[1:0] == 2'b00)
+          else $error("[IMEM] Misaligned fetch @ %h", read_address);
+        if (!in_range)
+          $warning("[IMEM] Fetch OOR: idx=%0d (depth=64). Returning NOP.", word_index_full);
+    end
+    // synthesis translate_on
+endmodule
 //=============================
 // Register File (x0..x31)
 //=============================
 module Reg_File(
-    input  logic        clk,
-    input  logic        reset,
-    input  logic        RegWrite,
-    input  logic [4:0]  Rs1,
-    input  logic [4:0]  Rs2,
-    input  logic [4:0]  Rd,
-    input  logic [31:0] Write_data,
-    output logic [31:0] read_data1,
-    output logic [31:0] read_data2
+    input  logic        clk,            // Clock signal
+    input  logic        reset_n,        // Active-low reset
+    input  logic        RegWrite,       // Write enable
+    input  logic [4:0]  Rs1,            // Source register 1
+    input  logic [4:0]  Rs2,            // Source register 2
+    input  logic [4:0]  Rd,             // Destination register
+    input  logic [31:0] Write_data,     // Data to write
+    output logic [31:0] read_data1,     // Read data from Rs1
+    output logic [31:0] read_data2      // Read data from Rs2
 );
     logic [31:0] regfile [0:31];
     integer i;
 
-    // Write port (x0 luôn 0)
-    always_ff @(posedge clk or posedge reset) begin
-        if (reset) begin
+    // Write port (x0 always 0)
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
             for (i = 0; i < 32; i = i + 1) regfile[i] <= 32'b0;
         end else if (RegWrite && (Rd != 5'd0)) begin
             regfile[Rd] <= Write_data;
         end
     end
 
-    // Read ports (combinational)
+    // Read ports (combination)
     assign read_data1 = (Rs1 == 5'd0) ? 32'b0 : regfile[Rs1];
     assign read_data2 = (Rs2 == 5'd0) ? 32'b0 : regfile[Rs2];
 endmodule
@@ -83,58 +95,97 @@ endmodule
 // Immediate Generator (I / S / B)
 //=============================
 module ImmGen(
-    input  logic [31:0] instruction,
-    output logic [31:0] ImmExt
+    input  logic [31:0] instruction,        // Input instruction
+    output logic [31:0] ImmExt              // Extended immediate value
 );
+    // Extract opcode once
     logic [6:0] opcode;
     assign opcode = instruction[6:0];
 
-	always_comb begin
-		unique case (opcode)
-			// I-type (load, ALU-I)
-			7'b0000011, 7'b0010011:
-				ImmExt = {{20{instruction[31]}}, instruction[31:20]};
-			// S-type
-			7'b0100011:
-				ImmExt = {{20{instruction[31]}}, instruction[31:25], instruction[11:7]};
-			// B-type
-			7'b1100011:
-				ImmExt = {{19{instruction[31]}},
-						  instruction[31], instruction[7],
-						  instruction[30:25], instruction[11:8],
-						  1'b0};
-			// J-type (JAL) – 21 bit immediate, LSB=0
-			7'b1101111:
-				ImmExt = {{11{instruction[31]}},
-						  instruction[31],
-						  instruction[19:12],
-						  instruction[20],
-						  instruction[30:21],
-						  1'b0};
-			// I-type JALR (opcode=1100111) dùng I-imm, đã cover ở trên nếu muốn gộp
-			// U-type LUI/AUIPC
-			7'b0110111, 7'b0010111:
-				ImmExt = {instruction[31:12], 12'b0};
-			default:
-				ImmExt = 32'b0;
-		endcase
-	end
+// Define the immediate extraction logic
+    localparam logic [6:0]
+        OPC_LOAD   = 7'b0000011,            // I-type (e.g., LW)
+        OPC_ALUI   = 7'b0010011,            // I-type ALU (e.g., ADDI)
+        OPC_STORE  = 7'b0100011,            // S-type (e.g., SW)
+        OPC_BRANCH = 7'b1100011,            // B-type (e.g., BEQ)
+        OPC_JAL    = 7'b1101111,            // J-type (JAL)
+        OPC_JALR   = 7'b1100111,            // I-type (JALR)
+        OPC_LUI    = 7'b0110111,            // U-type (LUI)
+        OPC_AUIPC  = 7'b0010111;            // U-type (AUIPC)
+
+    always_comb begin
+        unique case (opcode)
+            // I-type: LOAD, ALU-I, and JALR share the same immediate layout [31:20]
+            OPC_LOAD, OPC_ALUI, OPC_JALR: begin
+                // Sign-extend 12-bit imm: instruction[31:20]
+                ImmExt = {{20{instruction[31]}}, instruction[31:20]};
+            end
+
+            // S-type: imm[11:5]=[31:25], imm[4:0]=[11:7]
+            OPC_STORE: begin
+                ImmExt = {{20{instruction[31]}}, instruction[31:25], instruction[11:7]};
+            end
+
+            // B-type: imm[12|10:5|4:1|11|0] = [31|30:25|11:8|7|0]
+            OPC_BRANCH: begin
+                ImmExt = {{19{instruction[31]}},
+                          instruction[31], instruction[7],
+                          instruction[30:25], instruction[11:8],
+                          1'b0};
+            end
+
+            // J-type (JAL): imm[20|10:1|11|19:12|0] = [31|30:21|20|19:12|0]
+            OPC_JAL: begin
+                ImmExt = {{11{instruction[31]}},
+                          instruction[31],
+                          instruction[19:12],
+                          instruction[20],
+                          instruction[30:21],
+                          1'b0};
+            end
+
+            // U-type (LUI/AUIPC): imm[31:12] << 12
+            OPC_LUI, OPC_AUIPC: begin
+                ImmExt = {instruction[31:12], 12'b0};
+            end
+
+            default: begin
+                // For unsupported opcodes (SYSTEM, FENCE, etc.), return 0
+                ImmExt = 32'b0;
+            end
+        endcase
+    end
+
+    // Synthesis assertion to ensure B-type and J-type immediates have LSB=0
+    always_comb begin
+        if (opcode == OPC_BRANCH) begin
+            assert (ImmExt[0] == 1'b0)
+                else $error("B-type imm LSB should be 0");
+        end
+        if (opcode == OPC_JAL) begin
+            assert (ImmExt[0] == 1'b0)
+                else $error("J-type imm LSB should be 0");
+        end
+    end
+    // synthesis translate_on
 
 endmodule
+
 
 //=============================
 // Control Unit
 //=============================
 module Control_Unit(
-    input  logic [6:0]  opcode,
-    output logic        Branch,
-    output logic        MemRead,
-    output logic        MemtoReg,
-    output logic [1:0]  ALUOp,
-    output logic        MemWrite,
-    output logic        ALUSrc,
-    output logic        RegWrite,     // << thêm dấu phẩy ở đây
-    // mới
+    input  logic [6:0]  opcode,     // Input opcode from instruction
+    output logic        Branch,     // Branch enable
+    output logic        MemRead,    // Memory read enable
+    output logic        MemtoReg,   // Memory to register
+    output logic [1:0]  ALUOp,      // ALU operation select
+    output logic        MemWrite,   // Memory write enable
+    output logic        ALUSrc,     // ALU source select (0: Rs2, 1: Imm)
+    output logic        RegWrite,   // Register write enable
+
+    // Additional control signals for PC and result selection
     output logic [1:0]  PCSel,        // 00: normal/branch, 01: JAL, 10: JALR
     output logic [1:0]  ResultSrc,    // 00: ALU, 01: Mem, 10: PC+4
     output logic        ALUSrcA       // 0: A=Rs1, 1: A=PC  (AUIPC)
@@ -205,10 +256,12 @@ endmodule
 // ALU
 //=============================
 module ALU_unit(
-    input  logic [31:0] A,
-    input  logic [31:0] B,
-    input  logic [3:0]  Control_in,
-    output logic [31:0] ALU_result,
+    input  logic [31:0] A,              // First operand (Rs1 or PC)
+    input  logic [31:0] B,              // Second operand (Rs2 or Imm)
+    input  logic [3:0]  Control_in,     // ALU control signal
+    output logic [31:0] ALU_result,     // ALU result
+
+    // Zero flag for branch comparison
     output logic        zero
 );
     always_comb begin
@@ -231,8 +284,8 @@ module ALU_Control(
     input  logic [1:0]  ALUOp,
     input  logic        funct7,      // instruction[30]
     input  logic [2:0]  funct3,      // instruction[14:12]
-	input  logic        is_rtype, 
-    output logic [3:0]  Control_out
+	input  logic        is_rtype,    // R-type instruction
+    output logic [3:0]  Control_out  // ALU control output
 );
     always_comb begin
         unique case (ALUOp)
@@ -240,15 +293,15 @@ module ALU_Control(
             2'b01: Control_out = 4'b0110;   // SUB (branch compare)
             2'b10: begin                    // R-type & I-type
 					unique case (funct3)
-						3'b000: Control_out = (is_rtype && funct7) ? 4'b0110  // SUB (R)
-                                                               : 4'b0010; // ADD / ADDI
-						3'b111: Control_out = 4'b0000; // AND
-						3'b110: Control_out = 4'b0001; // OR
-						default: Control_out = 4'b0010; // mặc định ADD
+						3'b000: Control_out = (is_rtype && funct7) ? 4'b0110    // SUB (R)
+                                                               : 4'b0010;       // ADD / ADDI
+						3'b111: Control_out = 4'b0000;          // AND
+						3'b110: Control_out = 4'b0001;          // OR
+						default: Control_out = 4'b0010;         // Default ADD
 					endcase
 				end
-			2'b11: Control_out = 4'b0111;
-            default: Control_out = 4'b0010;
+			2'b11: Control_out = 4'b0111;       // LUI (imm)
+            default: Control_out = 4'b0010;     // Default to ADD
         endcase
     end
 endmodule
@@ -257,26 +310,26 @@ endmodule
 // Data Memory (64 words)
 //=============================
 module Data_Memory(
-    input  logic        clk,
-    input  logic        reset,
-    input  logic        MemWrite,
-    input  logic        MemRead,
-    input  logic [31:0] read_address,  // byte address
-    input  logic [31:0] Write_data,
-    output logic [31:0] MemData_out
+    input  logic        clk,            // Clock signal
+    input  logic        reset_n,        // Active-low reset
+    input  logic        MemWrite,       // Memory write enable
+    input  logic        MemRead,        // Memory read enable
+    input  logic [31:0] read_address,   // byte address
+    input  logic [31:0] Write_data,     // Data to write
+    output logic [31:0] MemData_out     // Data read from memory
 );
     logic [31:0] D_Memory [0:63];
     integer i;
 
-    always_ff @(posedge clk or posedge reset) begin
-        if (reset) begin
-            for (i = 0; i < 64; i = i + 1) D_Memory[i] <= 32'b0;
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (reset_n) begin
+            for (i = 0; i < 64; i = i + 1) D_Memory[i] <= 32'b0;                // Reset memory
         end else if (MemWrite) begin
-            D_Memory[read_address[31:2]] <= Write_data;
+            D_Memory[read_address[31:2]] <= Write_data;                         // Write data at word address
         end
     end
 
-    assign MemData_out = (MemRead) ? D_Memory[read_address[31:2]] : 32'b0;
+    assign MemData_out = (MemRead) ? D_Memory[read_address[31:2]] : 32'b0;      // Read data from memory
 endmodule
 
 //=============================
@@ -285,12 +338,12 @@ endmodule
 module Mux2to1 #(
     parameter W = 32
 )(
-    input  logic        sel,
-    input  logic [W-1:0] A,
+    input  logic        sel,            // 0:A, 1:B
+    input  logic [W-1:0] A,    
     input  logic [W-1:0] B,
     output logic [W-1:0] Y
 );
-    assign Y = sel ? B : A; // sel==1 -> B
+    assign Y = sel ? B : A;             // sel==1 -> B
 endmodule
 
 //=============================
@@ -311,7 +364,7 @@ module Mux3to1 #(
             2'b01: Y = B;
             2'b10: Y = C;
             default: Y = A;
-        endcase
+    endcase
     end
 endmodule
 
@@ -330,9 +383,9 @@ endmodule
 // Branch comparator (BEQ/BNE)
 //=============================
 module Branch_Unit(
-    input  logic        branch_en,        // Branch từ Control_Unit
+    input  logic        branch_en,        // Branch from Control_Unit
     input  logic [2:0]  funct3,           // instruction[14:12]
-    input  logic        zero,             // từ ALU (A-B==0)
+    input  logic        zero,             // from ALU (A-B==0)
     output logic        take_branch
 );
     always_comb begin
@@ -342,154 +395,13 @@ module Branch_Unit(
             unique case (funct3)
                 3'b000: take_branch =  zero; // BEQ
                 3'b001: take_branch = ~zero; // BNE
-                default: take_branch = 1'b0; // các branch khác: chưa hỗ trợ
+                default: take_branch = 1'b0; // Non supported
             endcase
         end
     end
 endmodule
 
-//=============================
-// Top-level Datapath (single-cycle)
-//=============================
-module top(
-    input logic clk,
-    input logic reset_n
-);
-    // Wires
-    logic [31:0] PC_top, instruction_top;
-    logic [31:0] Rd1_top, Rd2_top, ImmExt_top;
-    logic [31:0] ALU_B_mux_out;
-    logic [31:0] branch_target, NextPC_top, PCin_top;
-    logic [31:0] ALU_result_top, MemData_top, WriteBack_top;
 
-    logic        RegWrite_top, ALUSrc_top, zero_top, Branch_top;
-    logic        MemtoReg_top, MemWrite_top, MemRead_top;
-    logic [1:0]  ALUOp_top;
-    logic [3:0]  ALUcontrol_top;
-
-	logic [1:0]  PCSel_top;        // từ Control_Unit
-    logic [1:0]  ResultSrc_top;    // từ Control_Unit
-    logic        ALUSrcA_top;      // từ Control_Unit
-    logic        take_branch;
-	
-	logic [31:0] ALU_A_mux_out;
-    logic [2:0]  funct3_top;
-    logic [31:0] jalr_target_masked;
-	
-	
-	assign funct3_top = instruction_top[14:12];
-	
-    // Program Counter
-    Program_Counter uPC(
-        .clk(clk), .reset(~reset_n), .PC_in(PCin_top), .PC_out(PC_top)
-    );
-
-    // PC + 4
-    PC_plus4 uPC4(
-        .fromPC(PC_top), .NextPC(NextPC_top)
-    );
-
-    // Instruction Memory
-    Instruction_Memory uIMem(
-        .clk(clk), .reset(~reset_n),
-        .read_address(PC_top),
-        .instruction_out(instruction_top)
-    );
-
-    // Control Unit
-    Control_Unit uCtrl(
-        .opcode(instruction_top[6:0]),
-        .Branch(Branch_top), .MemRead(MemRead_top), .MemtoReg(MemtoReg_top),
-        .ALUOp(ALUOp_top), .MemWrite(MemWrite_top),
-        .ALUSrc(ALUSrc_top), .RegWrite(RegWrite_top),
-        .PCSel(PCSel_top), .ResultSrc(ResultSrc_top), .ALUSrcA(ALUSrcA_top)
-    );
-
-    // Register File
-    Reg_File uRF(
-        .clk(clk), .reset(~reset_n), .RegWrite(RegWrite_top),
-        .Rs1(instruction_top[19:15]),
-        .Rs2(instruction_top[24:20]),
-        .Rd (instruction_top[11:7]),
-        .Write_data(WriteBack_top),
-        .read_data1(Rd1_top), .read_data2(Rd2_top)
-    );
-
-    // ImmGen
-    ImmGen uImm(
-        .instruction(instruction_top),
-        .ImmExt(ImmExt_top)
-    );
-
-    // ALU Control
-    ALU_Control uALUC(
-        .ALUOp(ALUOp_top),
-        .funct7(instruction_top[30]),
-        .funct3(instruction_top[14:12]),
-		.is_rtype(instruction_top[6:0] == 7'b0110011),
-        .Control_out(ALUcontrol_top)
-    );
-	
-	// === A-input mux (A = Rs1 hoặc PC) ===
-    Mux2to1 #(32) uALUAmux(
-		.sel(ALUSrcA_top), 
-		.A(Rd1_top), 
-		.B(PC_top), 
-		.Y(ALU_A_mux_out)
-	);
-
-    // ALU B-input mux (Reg vs Imm)
-	Mux2to1 #(32) uALUBmux(
-		.sel(ALUSrc_top), 
-		.A(Rd2_top), 
-		.B(ImmExt_top), 
-		.Y(ALU_B_mux_out)
-	);
-
-    // ALU
-    ALU_unit uALU(
-        .A(ALU_A_mux_out), .B(ALU_B_mux_out), .Control_in(ALUcontrol_top),
-        .ALU_result(ALU_result_top), .zero(zero_top)
-    );
-
-
-    // Branch target = PC + Imm (Imm đã có bit0=0 cho B-type)
-    Adder uBranchAdd(
-        .in_1(PC_top), .in_2(ImmExt_top), .Sum_out(branch_target)
-    );
-
-    // Branch decision
-    Branch_Unit uBranch(
-        .branch_en(Branch_top), .funct3(funct3_top), .zero(zero_top),
-        .take_branch(take_branch)
-    );
-
-	// JALR target = (Rs1 + Imm) & ~1
-    assign jalr_target_masked = (ALU_result_top & 32'hFFFF_FFFE);
-	
-    // Next PC mux
-    always_comb begin
-        unique case (PCSel_top)
-            2'b00: PCin_top = (take_branch) ? branch_target : NextPC_top; // normal/branch
-            2'b01: PCin_top = branch_target;                               // JAL (PC + imm)
-            2'b10: PCin_top = jalr_target_masked;                          // JALR
-            default: PCin_top = NextPC_top;
-        endcase
-    end
-
-    // Data Memory
-    Data_Memory uDMem(
-        .clk(clk), .reset(~reset_n),
-        .MemWrite(MemWrite_top), .MemRead(MemRead_top),
-        .read_address(ALU_result_top),
-        .Write_data(Rd2_top),
-        .MemData_out(MemData_top)
-    );
-
-    // Writeback mux
-    Mux3to1 #(32) uWBmux3(
-        .sel(ResultSrc_top), .A(ALU_result_top), .B(MemData_top), .C(NextPC_top),
-        .Y(WriteBack_top)
-    );
-
-endmodule
+//=============================================
+// End of RTL/RISC-V/risc-v-32-bit.sv
+//=============================================
