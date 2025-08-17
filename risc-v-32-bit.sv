@@ -41,7 +41,7 @@ module Instruction_Memory(
     input  logic [31:0] read_address,   // byte address
     output logic [31:0] instruction_out // Instruction output (32 bits)
 );
-    // 64 x 32-bit IMEM (testbench preloads via uut.uIMem.I_Mem)
+    // 64 x 32-bit IMEM 
     logic [31:0] I_Mem [0:63];
 
     // Combinational read by word index
@@ -157,6 +157,7 @@ module ImmGen(
     end
 
     // Synthesis assertion to ensure B-type and J-type immediates have LSB=0
+    // synthesis translate_off
     always_comb begin
         if (opcode == OPC_BRANCH) begin
             assert (ImmExt[0] == 1'b0)
@@ -322,7 +323,7 @@ module Data_Memory(
     integer i;
 
     always_ff @(posedge clk or negedge reset_n) begin
-        if (reset_n) begin
+        if (!reset_n) begin
             for (i = 0; i < 64; i = i + 1) D_Memory[i] <= 32'b0;                // Reset memory
         end else if (MemWrite) begin
             D_Memory[read_address[31:2]] <= Write_data;                         // Write data at word address
