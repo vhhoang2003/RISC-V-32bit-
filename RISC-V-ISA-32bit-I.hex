@@ -58,4 +58,4 @@
 000000e4: 0ff0000f  fence
 000000e8: 00000073  ecall
 000000ec: 00100073  ebreak
-000000f0: 0000006f  jal x0,+240          ; loop vô hạn
+000000f0: 0000006f  jal x0,+240          ; loop
