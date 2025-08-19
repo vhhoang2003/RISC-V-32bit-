@@ -361,9 +361,9 @@ module Mux3to1 #(
 );
     always_comb begin
         unique case (sel)
-            2'b00: Y = A;
-            2'b01: Y = B;
-            2'b10: Y = C;
+            2'b00: Y = A;           // sel==00 -> A
+            2'b01: Y = B;           // sel==01 -> B
+            2'b10: Y = C;           // sel==10 -> C
             default: Y = A;
     endcase
     end
